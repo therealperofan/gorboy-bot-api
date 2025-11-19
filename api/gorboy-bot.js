@@ -1,5 +1,6 @@
 // api/gorboy-bot.js
-// GORBOY GUARD BOT v0.3 — commands + /scan + DYOR helper (no echo)
+// GORBOY GUARD BOT v0.5
+// Commands + /scan + DYOR helper + keyword triggers + inline mode + status/patterns/mind
 
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 
@@ -30,10 +31,30 @@ async function tgSend(chatId, text, extra = {}) {
 }
 
 /**
+ * Answer inline query
+ */
+async function tgAnswerInline(inlineQueryId, results) {
+  if (!BOT_TOKEN) return;
+  try {
+    await fetch(
+      `https://api.telegram.org/bot${BOT_TOKEN}/answerInlineQuery`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          inline_query_id: inlineQueryId,
+          results,
+          cache_time: 2,
+        }),
+      }
+    );
+  } catch (err) {
+    console.error("TG inline error:", err);
+  }
+}
+
+/**
  * Try to detect $TICKER or address from text
- * - supports "$GORBOY"
- * - supports plain "GORBOY"
- * - supports base58-like address
  */
 function extractTokenFromText(text) {
   if (!text) return null;
@@ -46,7 +67,7 @@ function extractTokenFromText(text) {
     return { type: "ticker", value: tickerMatch[1].toUpperCase() };
   }
 
-  // 2) Solana/Gorbagana-like address
+  // 2) base58-like address (Solana/Gorbagana style)
   const addrMatch = trimmed.match(/[1-9A-HJ-NP-Za-km-z]{25,64}/);
   if (addrMatch) {
     return { type: "address", value: addrMatch[0] };
@@ -106,6 +127,45 @@ function buildDyorLinks(token) {
   };
 }
 
+/**
+ * Simple GORBOY MIND reply generator (offline, deterministic)
+ */
+function buildMindReply(input) {
+  const base = input.trim();
+  if (!base) {
+    return (
+      "🧠 GORBOY MIND\n" +
+      "Send `/mind <text>` and I’ll judge your idea like a lazy risk engine."
+    );
+  }
+
+  const textLower = base.toLowerCase();
+  let verdict = "";
+
+  if (textLower.includes("safe") || textLower.includes("guarantee")) {
+    verdict =
+      "If you need a guarantee, you’re in the wrong casino. Size your risk or walk away.";
+  } else if (textLower.includes("pump") || textLower.includes("moon")) {
+    verdict =
+      "If the only word you see is ‘pump’, you’re probably the liquidity.";
+  } else if (textLower.includes("hold") || textLower.includes("diamond")) {
+    verdict =
+      "Diamond hands are cool until rent is due. Decide which bill you’re paying with this trade.";
+  } else if (textLower.includes("gorboy") || textLower.includes("ggt")) {
+    verdict =
+      "GORBOY will not save you. It will just make the chaos look pretty.";
+  } else {
+    verdict =
+      "Here is the alpha: there is no alpha. Use tools, manage risk, stop coping.";
+  }
+
+  return (
+    "🧠 GORBOY MIND\n\n" +
+    `Input: "${base}"\n\n` +
+    `Output: ${verdict}`
+  );
+}
+
 export default async function handler(req, res) {
   // Telegram may ping with GET — always ok
   if (req.method !== "POST") {
@@ -118,6 +178,75 @@ export default async function handler(req, res) {
   }
 
   const update = req.body || {};
+
+  // ------------- INLINE MODE -------------
+  if (update.inline_query) {
+    const iq = update.inline_query;
+    const q = (iq.query || "").trim();
+    const token = extractTokenFromText(q);
+
+    let results = [];
+
+    if (token) {
+      const meta = buildDyorLinks(token);
+      const title = meta.title;
+      const trashscanUrl = meta.trashscan;
+      const ggtUrl = meta.ggt;
+
+      let extraLine = "";
+      if (meta.extra) extraLine = `\nNote: ${meta.extra}`;
+
+      const messageText =
+        "🔍 *GORBOY INLINE DYOR*\n\n" +
+        `Target: \`${title}\`\n` +
+        `Type: *${token.type.toUpperCase()}*` +
+        `${extraLine}\n\n` +
+        "Links:\n" +
+        `• Trashscan: ${trashscanUrl}\n` +
+        `• GGT Terminal: ${ggtUrl}\n\n` +
+        "_Inline result. Use bot chat for full commands._";
+
+      results.push({
+        type: "article",
+        id: iq.id || "1",
+        title: `Scan ${title}`,
+        description: "Trashscan + GGT links bundle.",
+        input_message_content: {
+          message_text: messageText,
+          parse_mode: "Markdown",
+        },
+        reply_markup: {
+          inline_keyboard: [
+            [
+              { text: "🧪 Trashscan", url: trashscanUrl },
+              { text: "🛰 GGT Terminal", url: ggtUrl },
+            ],
+          ],
+        },
+      });
+    } else {
+      const messageText =
+        "⚙ GORBOY INLINE MODE\n\n" +
+        "Type `$ticker` or a token address in this inline field.\n" +
+        "I’ll build a quick DYOR snapshot with links.";
+
+      results.push({
+        type: "article",
+        id: iq.id || "1",
+        title: "How to use inline",
+        description: "Type $ticker or address to get DYOR bundle.",
+        input_message_content: {
+          message_text: messageText,
+        },
+      });
+    }
+
+    await tgAnswerInline(iq.id, results);
+    return res.status(200).json({ ok: true });
+  }
+
+  // ------------- NORMAL MESSAGES -------------
+
   const msg = update.message || update.edited_message;
 
   if (!msg || !msg.text) {
@@ -139,7 +268,10 @@ export default async function handler(req, res) {
       "• /links – core GORBOY / GGT links\n" +
       "• /site – main GORBOY site\n" +
       "• /ggt – Guard Terminal (web)\n" +
+      "• /status – static system status\n" +
+      "• /patterns – basic pattern alerts explainer\n" +
       "• /disclaimer – DYOR reminder\n" +
+      "• /mind <text> – sarcastic GORBOY MIND\n" +
       "• /scan <ticker|address> – quick DYOR snapshot\n" +
       "• Or just send $ticker / address directly\n\n" +
       "0$ budget · html/css/js · vercel\n" +
@@ -168,11 +300,15 @@ export default async function handler(req, res) {
       "/links – core ecosystem links\n" +
       "/site – main GORBOY website\n" +
       "/ggt – Guard Terminal (web)\n" +
+      "/status – system status snapshot\n" +
+      "/patterns – pattern alerts TL;DR\n" +
       "/disclaimer – risk / DYOR reminder\n" +
+      "/mind <text> – sarcastic reply\n" +
       "/scan <ticker|address> – build DYOR snapshot\n\n" +
       "Shortcuts:\n" +
       "• Send `$GORBOY`, `$trashcoin`, `$ANYTHING`\n" +
-      "• Or paste a token address.\n";
+      "• Or paste a token address.\n" +
+      "• Type `site`, `ggt`, `gorboy`, `links`, `help`, `scan`…";
     await tgSend(chatId, reply);
     return res.status(200).json({ ok: true });
   }
@@ -209,6 +345,38 @@ export default async function handler(req, res) {
     return res.status(200).json({ ok: true });
   }
 
+  // /status
+  if (lower.startsWith("/status")) {
+    const reply =
+      "📡 GORBOY GUARD STATUS (static)\n\n" +
+      "CHAIN: Gorbagana (concept layer)\n" +
+      "RPC: planned integration\n" +
+      "GGT: web terminal online\n" +
+      "BOT: command router online\n" +
+      "RISK ENGINE: text-based placeholders\n" +
+      "PATTERN ALERTS: description only (no live feed yet)\n\n" +
+      "This is a cosmetic status. Real on-chain checks will be wired later.";
+    await tgSend(chatId, reply);
+    return res.status(200).json({ ok: true });
+  }
+
+  // /patterns
+  if (lower.startsWith("/patterns")) {
+    const reply =
+      "📈 PATTERN ALERTS — BASIC TL;DR\n\n" +
+      "• FLAT TAIL\n" +
+      "  Tail = small holders. If it’s flat — no organic retail.\n" +
+      "  Often means: extremely early, synthetic, or manipulated.\n\n" +
+      "• DOUBLE SHOULDER\n" +
+      "  Two medium-weight clusters separated by a gap.\n" +
+      "  Can signal segmented whales / coordinated groups.\n\n" +
+      "• HEAVY TOP1\n" +
+      "  One holder dominates. Even if the chart looks fine, the risk is social.\n\n" +
+      "GGT will paint these as field patterns. Here you just get text hints.";
+    await tgSend(chatId, reply);
+    return res.status(200).json({ ok: true });
+  }
+
   // /disclaimer
   if (lower.startsWith("/disclaimer")) {
     const reply =
@@ -222,9 +390,17 @@ export default async function handler(req, res) {
     return res.status(200).json({ ok: true });
   }
 
+  // /mind <text>
+  if (lower.startsWith("/mind")) {
+    const arg = text.slice(5).trim();
+    const reply = buildMindReply(arg);
+    await tgSend(chatId, reply);
+    return res.status(200).json({ ok: true });
+  }
+
   // /scan <something>
   if (lower.startsWith("/scan")) {
-    const arg = text.slice(5).trim(); // remove "/scan"
+    const arg = text.slice(5).trim();
     const token = extractTokenFromText(arg);
 
     if (!token) {
@@ -241,9 +417,7 @@ export default async function handler(req, res) {
     const ggtUrl = meta.ggt;
 
     let extraLine = "";
-    if (meta.extra) {
-      extraLine = `\nNote: ${meta.extra}`;
-    }
+    if (meta.extra) extraLine = `\nNote: ${meta.extra}`;
 
     const reply =
       "🔍 GORBOY SCAN REQUEST\n\n" +
@@ -271,9 +445,7 @@ export default async function handler(req, res) {
     const ggtUrl = meta.ggt;
 
     let extraLine = "";
-    if (meta.extra) {
-      extraLine = `\nNote: ${meta.extra}`;
-    }
+    if (meta.extra) extraLine = `\nNote: ${meta.extra}`;
 
     const reply =
       "🔍 GORBOY DYOR SNAPSHOT\n\n" +
@@ -290,6 +462,90 @@ export default async function handler(req, res) {
     return res.status(200).json({ ok: true });
   }
 
+  // ------------- KEYWORD TRIGGERS (no slash) -------------
+
+  // "site"
+  if (lower === "site" || lower.includes(" site")) {
+    await tgSend(
+      chatId,
+      "🌐 GORBOY WEBSITE\nhttps://www.gorboy.wtf\n\n" +
+        "Brand · Lore · Guard Terminal preview."
+    );
+    return res.status(200).json({ ok: true });
+  }
+
+  // "ggt" / "terminal" / "guard"
+  if (
+    lower === "ggt" ||
+    lower.includes(" ggt") ||
+    lower.includes("terminal") ||
+    lower.includes("guard terminal") ||
+    lower === "guard"
+  ) {
+    await tgSend(
+      chatId,
+      "🛰 GORBOY GUARD TERMINAL\nhttps://ggt.wtf\n\n" +
+        "Paste a mint → Hit SCAN → Watch the field react."
+    );
+    return res.status(200).json({ ok: true });
+  }
+
+  // "help" / "commands"
+  if (lower === "help" || lower.includes(" commands")) {
+    const reply =
+      "I react to commands and token hints.\n\n" +
+      "Commands:\n" +
+      "/start, /help, /links, /site, /ggt, /status, /patterns, /disclaimer, /mind, /scan\n\n" +
+      "Shortcuts:\n" +
+      "Send $ticker or token address to get DYOR links.";
+    await tgSend(chatId, reply);
+    return res.status(200).json({ ok: true });
+  }
+
+  // "links" / "link"
+  if (lower === "links" || lower === "link" || lower.includes(" links")) {
+    const reply =
+      "🔗 GORBOY / GGT LINKS\n\n" +
+      "• Site: https://www.gorboy.wtf\n" +
+      "• Guard Terminal: https://ggt.wtf\n\n" +
+      "Bot = Telegram edge of GORBOY GUARD TERMINAL.";
+    await tgSend(chatId, reply);
+    return res.status(200).json({ ok: true });
+  }
+
+  // "scan"
+  if (lower === "scan" || lower.includes(" scan")) {
+    const reply =
+      "To request a scan, use:\n" +
+      "/scan $ticker\n" +
+      "/scan TICKER\n" +
+      "/scan <token_address>\n\n" +
+      "Or just send $ticker / address directly.";
+    await tgSend(chatId, reply);
+    return res.status(200).json({ ok: true });
+  }
+
+  // "gorboy"
+  if (lower === "gorboy" || lower.includes("gorboy")) {
+    const reply =
+      "GORBOY is a brand, a meme and a Guard Terminal.\n\n" +
+      "🌐 Site: https://www.gorboy.wtf\n" +
+      "🛰 GGT: https://ggt.wtf\n\n" +
+      "0$ budget. html/css/js. Meme.Build.Repeat.";
+    await tgSend(chatId, reply);
+    return res.status(200).json({ ok: true });
+  }
+
+  // "trashscan"
+  if (lower === "trashscan" || lower.includes("trashscan")) {
+    const reply =
+      "🧪 TRASHSCAN\nBase explorer for Gorbagana ecosystem.\n\n" +
+      "Open Trashscan and paste your mint:\n" +
+      "https://trashscan.xyz";
+    await tgSend(chatId, reply);
+    return res.status(200).json({ ok: true });
+  }
+
   // ------------- DEFAULT: NO ECHO, JUST HINT -------------
 
   const hint =
@@ -298,7 +554,8 @@ export default async function handler(req, res) {
     "• /help\n" +
     "• /scan $ticker\n" +
     "• /scan <token_address>\n" +
-    "• Send `$GORBOY` or any other ticker.";
+    "• Send `$GORBOY` or any other ticker.\n" +
+    "• Type `site` or `ggt` for quick links.";
 
   await tgSend(chatId, hint);
   return res.status(200).json({ ok: true });
