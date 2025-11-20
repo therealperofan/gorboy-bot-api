@@ -118,11 +118,12 @@ function buildDyorLinks(token) {
     };
   }
 
-  // Address
+  // Address → ВАЖНО: ссылка под автоскан в GGT
   return {
     title: value,
     trashscan: `https://trashscan.xyz/token/${encoded}`,
-    ggt: `https://ggt.wtf/scan?token=${encoded}`,
+    // тут меняем на ?mint= чтобы autoScanFromUrl мог подцепить
+    ggt: `https://ggt.wtf/?mint=${encoded}`,
     extra: null,
   };
 }
@@ -164,9 +165,7 @@ function buildMindReply(input) {
     `Input: "${base}"\n\n` +
     `Output: ${verdict}`
   );
-}
-
-export default async function handler(req, res) {
+}export default async function handler(req, res) {
   // Telegram may ping with GET — always ok
   if (req.method !== "POST") {
     return res.status(200).json({ ok: true, method: "GET" });
@@ -259,9 +258,31 @@ export default async function handler(req, res) {
 
   // ------------- COMMAND ROUTER -------------
 
-  // /start
+  // /start (+ payload с deep-link)
   if (lower.startsWith("/start")) {
-    const intro =
+    // payload может прийти как "/start something"
+    const parts = text.split(" ");
+    let payload = parts.length > 1 ? parts.slice(1).join(" ").trim() : "";
+
+    let deepToken = null;
+
+    if (payload) {
+      try {
+        // если прилетело url-энкоднутое значение
+        payload = decodeURIComponent(payload);
+      } catch (e) {
+        // ignore decode errors
+      }
+
+      // поддержка префикса "scan_XXXXXXXX"
+      if (payload.toLowerCase().startsWith("scan_")) {
+        payload = payload.slice(5);
+      }
+
+      deepToken = extractTokenFromText(payload);
+    }
+
+    let intro =
       "⚡ GORBOY GUARD BOT ONLINE\n\n" +
       "What I can do right now:\n" +
       "• /help – show all commands\n" +
@@ -276,6 +297,27 @@ export default async function handler(req, res) {
       "• Or just send $ticker / address directly\n\n" +
       "0$ budget · html/css/js · vercel\n" +
       "Meme.Build.Repeat.";
+
+    // если deep-link принёс токен → сразу отдаём мини-скан
+    if (deepToken) {
+      const meta = buildDyorLinks(deepToken);
+      const title = meta.title;
+      const trashscanUrl = meta.trashscan;
+      const ggtUrl = meta.ggt;
+
+      let extraLine = "";
+      if (meta.extra) extraLine = `\nNote: ${meta.extra}`;
+
+      intro +=
+        "\n\n" +
+        "🔍 DEEP-LINK SCAN\n" +
+        `Target: ${title}\n` +
+        `Type: ${deepToken.type.toUpperCase()}` +
+        `${extraLine}\n\n` +
+        "Links:\n" +
+        `• Trashscan: ${trashscanUrl}\n` +
+        `• GGT Terminal (auto-scan): ${ggtUrl}\n`;
+    }
 
     await tgSend(chatId, intro, {
       reply_markup: {
