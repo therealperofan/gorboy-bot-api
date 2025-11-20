@@ -482,7 +482,7 @@ function shouldReactToGroupMessage(text) {
       `Type: *${token.type.toUpperCase()}*` +
       `${extraLine}\n\n` +
       "Links:\n" +
-      `• Trashscan: ${trashscanUrl}\n" +
+      `• Trashscan: ${trashscanUrl}\n` +
       `• GGT Terminal: ${ggtUrl}\n\n` +
       "This is a link bundle, not a verdict.\n" +
       "*Always* do your own research.";
@@ -491,11 +491,11 @@ function shouldReactToGroupMessage(text) {
     return res.status(200).json({ ok: true });
   }
 
-  // ------------- ФИЛЬТР ДЛЯ ГРУПП: молчать, если нет GOR/GORBOY/$ticker -------------
+  // ------------- ФИЛЬТР ДЛЯ ГРУПП -------------
 
   const isCommand = lower.startsWith("/");
   if (isGroupLike && !isCommand && !shouldReactToGroupMessage(text)) {
-    // просто игнорим сообщение
+    // в группах и каналах игнорим всё, что не относится к GOR/GORBOY/$ticker
     return res.status(200).json({ ok: true });
   }
 
@@ -504,7 +504,7 @@ function shouldReactToGroupMessage(text) {
   let token = extractTokenFromText(text);
 
   // Для raw-сообщений тикер учитываем только если есть знак $
-  if (token && token.type === "ticker") {
+  if (token && token.type === "ticker")) {
     const dollarRegex = new RegExp("\\$" + token.value + "\\b", "i");
     if (!dollarRegex.test(text)) {
       token = null;
