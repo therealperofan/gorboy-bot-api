@@ -74,6 +74,7 @@ function extractTokenFromText(text) {
   }
 
   // 3) plain word → treat as ticker (e.g. "gorboy")
+  // (нужно для /scan, но не для авто-DYOR по обычным сообщениям)
   const plainMatch = trimmed.match(/^[A-Za-z0-9_]{2,20}$/);
   if (plainMatch) {
     return { type: "ticker", value: plainMatch[0].toUpperCase() };
@@ -122,7 +123,7 @@ function buildDyorLinks(token) {
   return {
     title: value,
     trashscan: `https://trashscan.xyz/token/${encoded}`,
-    // тут меняем на ?mint= чтобы autoScanFromUrl мог подцепить
+    // под autoScanFromUrl (параметр mint)
     ggt: `https://ggt.wtf/?mint=${encoded}`,
     extra: null,
   };
@@ -165,7 +166,9 @@ function buildMindReply(input) {
     `Input: "${base}"\n\n` +
     `Output: ${verdict}`
   );
-}export default async function handler(req, res) {
+}
+
+export default async function handler(req, res) {
   // Telegram may ping with GET — always ok
   if (req.method !== "POST") {
     return res.status(200).json({ ok: true, method: "GET" });
@@ -255,6 +258,9 @@ function buildMindReply(input) {
   const chatId = msg.chat.id;
   const text = msg.text.trim();
   const lower = text.toLowerCase();
+  const chatType = msg.chat.type || "private";
+  const isGroupLike =
+    chatType === "group" || chatType === "supergroup" || chatType === "channel";
 
   // ------------- COMMAND ROUTER -------------
 
@@ -476,9 +482,22 @@ function buildMindReply(input) {
     return res.status(200).json({ ok: true });
   }
 
-  // ------------- DYOR on raw message (no /scan) -------------
+  //
+  // ===== ДАЛЬШЕ — ТОЛЬКО ТО, ЧТО ТЫ ПРОСИЛ =====
+  //
 
-  const token = extractTokenFromText(text);
+  // 1) DYOR на обычное сообщение — только если:
+  //    • есть $TICKER  (например, $trashcoin)
+  //    • или это адрес (base58)
+  let token = extractTokenFromText(text);
+
+  if (token && token.type === "ticker") {
+    // для авто-DYOR требуем именно форму с $
+    const dollarRegex = new RegExp("\\$" + token.value + "\\b", "i");
+    if (!dollarRegex.test(text)) {
+      token = null;
+    }
+  }
 
   if (token) {
     const meta = buildDyorLinks(token);
@@ -504,100 +523,39 @@ function buildMindReply(input) {
     return res.status(200).json({ ok: true });
   }
 
-  // ------------- KEYWORD TRIGGERS (no slash) -------------
+  // 2) Реакция на GOR / GORBOY → выдаём команды
+  const hasGorboy = /\bgorboy\b/i.test(text);
+  const hasGor = /\bgor\b/i.test(text);
 
-  // "site"
-  if (lower === "site" || lower.includes(" site")) {
-    await tgSend(
-      chatId,
-      "🌐 GORBOY WEBSITE\nhttps://www.gorboy.wtf\n\n" +
-        "Brand · Lore · Guard Terminal preview."
-    );
-    return res.status(200).json({ ok: true });
-  }
-
-  // "ggt" / "terminal" / "guard"
-  if (
-    lower === "ggt" ||
-    lower.includes(" ggt") ||
-    lower.includes("terminal") ||
-    lower.includes("guard terminal") ||
-    lower === "guard"
-  ) {
-    await tgSend(
-      chatId,
-      "🛰 GORBOY GUARD TERMINAL\nhttps://ggt.wtf\n\n" +
-        "Paste a mint → Hit SCAN → Watch the field react."
-    );
-    return res.status(200).json({ ok: true });
-  }
-
-  // "help" / "commands"
-  if (lower === "help" || lower.includes(" commands")) {
-    const reply =
-      "I react to commands and token hints.\n\n" +
-      "Commands:\n" +
-      "/start, /help, /links, /site, /ggt, /status, /patterns, /disclaimer, /mind, /scan\n\n" +
-      "Shortcuts:\n" +
-      "Send $ticker or token address to get DYOR links.";
-    await tgSend(chatId, reply);
-    return res.status(200).json({ ok: true });
-  }
-
-  // "links" / "link"
-  if (lower === "links" || lower === "link" || lower.includes(" links")) {
-    const reply =
-      "🔗 GORBOY / GGT LINKS\n\n" +
-      "• Site: https://www.gorboy.wtf\n" +
-      "• Guard Terminal: https://ggt.wtf\n\n" +
-      "Bot = Telegram edge of GORBOY GUARD TERMINAL.";
-    await tgSend(chatId, reply);
-    return res.status(200).json({ ok: true });
-  }
-
-  // "scan"
-  if (lower === "scan" || lower.includes(" scan")) {
-    const reply =
-      "To request a scan, use:\n" +
-      "/scan $ticker\n" +
-      "/scan TICKER\n" +
-      "/scan <token_address>\n\n" +
-      "Or just send $ticker / address directly.";
-    await tgSend(chatId, reply);
-    return res.status(200).json({ ok: true });
-  }
-
-  // "gorboy"
-  if (lower === "gorboy" || lower.includes("gorboy")) {
+  if (hasGorboy || hasGor) {
     const reply =
       "GORBOY is a brand, a meme and a Guard Terminal.\n\n" +
       "🌐 Site: https://www.gorboy.wtf\n" +
       "🛰 GGT: https://ggt.wtf\n\n" +
+      "Commands:\n" +
+      "/help – full menu\n" +
+      "/scan $ticker – quick DYOR\n" +
+      "/mind <text> – sarcastic engine\n\n" +
       "0$ budget. html/css/js. Meme.Build.Repeat.";
     await tgSend(chatId, reply);
     return res.status(200).json({ ok: true });
   }
 
-  // "trashscan"
-  if (lower === "trashscan" || lower.includes("trashscan")) {
-    const reply =
-      "🧪 TRASHSCAN\nBase explorer for Gorbagana ecosystem.\n\n" +
-      "Open Trashscan and paste your mint:\n" +
-      "https://trashscan.xyz";
-    await tgSend(chatId, reply);
+  // 3) Фоллбек:
+  //    • в группах вообще молчим,
+  //    • в личке можно дать мягкий хинт.
+  if (isGroupLike) {
     return res.status(200).json({ ok: true });
   }
 
-  // ------------- DEFAULT: NO ECHO, JUST HINT -------------
-
   const hint =
-    "I only react to commands and token hints.\n\n" +
+    "I only react to commands, `$tickers` and addresses.\n\n" +
     "Try:\n" +
     "• /help\n" +
     "• /scan $ticker\n" +
     "• /scan <token_address>\n" +
     "• Send `$GORBOY` or any other ticker.\n" +
-    "• Type `site` or `ggt` for quick links.";
+    "• Say `GORBOY` to see commands.";
 
   await tgSend(chatId, hint);
   return res.status(200).json({ ok: true });
