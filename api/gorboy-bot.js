@@ -1,8 +1,30 @@
 // api/gorboy-bot.js
-// GORBOY GUARD BOT v0.5
+// GORBOY GUARD BOT v0.6.1
 // Commands + /scan + DYOR helper + keyword triggers + inline mode + status/patterns/mind
+// + /rpc status + anti-spam + /about + GOR meme Easter eggs + autoScan (?mint)
 
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+const RPC_ENDPOINT =
+  process.env.GORBOY_RPC_URL || "https://rpc.gorbagana.wtf"; // при необходимости поменяешь
+
+// анти-спам: 5 секунд на одного юзера в одном чате
+const COOLDOWN_MS = 5000;
+const lastUserReplyAt = new Map();
+
+/**
+ * Anti-spam check per (chat, user)
+ */
+function isOnCooldown(chatId, fromId) {
+  if (!fromId) return false;
+  const key = `${chatId}:${fromId}`;
+  const now = Date.now();
+  const last = lastUserReplyAt.get(key) || 0;
+  if (now - last < COOLDOWN_MS) {
+    return true;
+  }
+  lastUserReplyAt.set(key, now);
+  return false;
+}
 
 /**
  * Send Telegram message
@@ -130,6 +152,33 @@ function buildDyorLinks(token) {
 }
 
 /**
+ * GOR meme Easter eggs
+ */
+function getEasterEggLine(token) {
+  if (!token || token.type !== "ticker") return "";
+
+  const v = token.value.toUpperCase();
+
+  if (v === "TRASHCOIN") {
+    return "\n🗑️ TRASHCOIN: the real OG Bitcoin on GOR. Cope accordingly.";
+  }
+
+  if (v === "TRASHBIN") {
+    return "\n🗑️ TRASHBIN: if TRASHCOIN is BTC, TRASHBIN is Mt.Gox.";
+  }
+
+  if (v === "GOR") {
+    return "\n🦍 GOR: not a token, a religion. A very small one, but still.";
+  }
+
+  if (v === "GORBOY") {
+    return "\n👾 GORBOY: built on pure chaos energy. No roadmap, only builds.";
+  }
+
+  return "";
+}
+
+/**
  * Simple GORBOY MIND reply generator (offline, deterministic)
  */
 function buildMindReply(input) {
@@ -168,6 +217,70 @@ function buildMindReply(input) {
   );
 }
 
+/**
+ * Fetch RPC status from Gorbagana RPC (Solana JSON-RPC compatible)
+ */
+async function fetchRpcStatus() {
+  if (!RPC_ENDPOINT) {
+    return { ok: false, error: "RPC endpoint not set" };
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 3000);
+  const started = Date.now();
+
+  try {
+    const res = await fetch(RPC_ENDPOINT, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      signal: controller.signal,
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "getSlot",
+        params: [],
+      }),
+    });
+
+    clearTimeout(timeout);
+
+    const latencyMs = Date.now() - started;
+
+    if (!res.ok) {
+      return {
+        ok: false,
+        error: `HTTP ${res.status}`,
+      };
+    }
+
+    let data = null;
+    try {
+      data = await res.json();
+    } catch (e) {
+      return {
+        ok: false,
+        error: "Invalid JSON from RPC",
+      };
+    }
+
+    const slot =
+      data && typeof data.result === "number" ? data.result : null;
+
+    return {
+      ok: true,
+      slot,
+      latencyMs,
+    };
+  } catch (err) {
+    clearTimeout(timeout);
+    console.error("RPC status error:", err);
+    return {
+      ok: false,
+      error: "RPC request failed",
+    };
+  }
+}
+
 export default async function handler(req, res) {
   // Telegram may ping with GET — always ok
   if (req.method !== "POST") {
@@ -194,6 +307,7 @@ export default async function handler(req, res) {
       const title = meta.title;
       const trashscanUrl = meta.trashscan;
       const ggtUrl = meta.ggt;
+      const eggLine = getEasterEggLine(token);
 
       let extraLine = "";
       if (meta.extra) extraLine = `\nNote: ${meta.extra}`;
@@ -202,7 +316,7 @@ export default async function handler(req, res) {
         "🔍 *GORBOY INLINE DYOR*\n\n" +
         `Target: \`${title}\`\n` +
         `Type: *${token.type.toUpperCase()}*` +
-        `${extraLine}\n\n` +
+        `${extraLine}${eggLine}\n\n` +
         "Links:\n" +
         `• Trashscan: ${trashscanUrl}\n` +
         `• GGT Terminal: ${ggtUrl}\n\n` +
@@ -261,6 +375,7 @@ export default async function handler(req, res) {
   const chatType = msg.chat.type || "private";
   const isGroupLike =
     chatType === "group" || chatType === "supergroup" || chatType === "channel";
+  const fromId = msg.from && msg.from.id;
 
   // ------------- COMMAND ROUTER -------------
 
@@ -292,11 +407,13 @@ export default async function handler(req, res) {
       "⚡ GORBOY GUARD BOT ONLINE\n\n" +
       "What I can do right now:\n" +
       "• /help – show all commands\n" +
+      "• /about – what GORBOY / GGT / bot are\n" +
       "• /links – core GORBOY / GGT links\n" +
       "• /site – main GORBOY site\n" +
       "• /ggt – Guard Terminal (web)\n" +
+      "• /rpc – Gorbagana RPC status\n" +
       "• /status – static system status\n" +
-      "• /patterns – basic pattern alerts explainer\n" +
+      "• /patterns – pattern alerts explainer\n" +
       "• /disclaimer – DYOR reminder\n" +
       "• /mind <text> – sarcastic GORBOY MIND\n" +
       "• /scan <ticker|address> – quick DYOR snapshot\n" +
@@ -310,6 +427,7 @@ export default async function handler(req, res) {
       const title = meta.title;
       const trashscanUrl = meta.trashscan;
       const ggtUrl = meta.ggt;
+      const eggLine = getEasterEggLine(deepToken);
 
       let extraLine = "";
       if (meta.extra) extraLine = `\nNote: ${meta.extra}`;
@@ -319,7 +437,7 @@ export default async function handler(req, res) {
         "🔍 DEEP-LINK SCAN\n" +
         `Target: ${title}\n` +
         `Type: ${deepToken.type.toUpperCase()}` +
-        `${extraLine}\n\n` +
+        `${extraLine}${eggLine}\n\n` +
         "Links:\n" +
         `• Trashscan: ${trashscanUrl}\n` +
         `• GGT Terminal (auto-scan): ${ggtUrl}\n`;
@@ -345,9 +463,11 @@ export default async function handler(req, res) {
       "🧾 GORBOY GUARD — COMMANDS\n\n" +
       "/start – intro & quick buttons\n" +
       "/help – this menu\n" +
+      "/about – what GORBOY / GGT / bot are\n" +
       "/links – core ecosystem links\n" +
       "/site – main GORBOY website\n" +
       "/ggt – Guard Terminal (web)\n" +
+      "/rpc – Gorbagana RPC status\n" +
       "/status – system status snapshot\n" +
       "/patterns – pattern alerts TL;DR\n" +
       "/disclaimer – risk / DYOR reminder\n" +
@@ -356,7 +476,22 @@ export default async function handler(req, res) {
       "Shortcuts:\n" +
       "• Send `$GORBOY`, `$trashcoin`, `$ANYTHING`\n" +
       "• Or paste a token address.\n" +
-      "• Type `site`, `ggt`, `gorboy`, `links`, `help`, `scan`…";
+      "• Say `GORBOY` to see commands.";
+    await tgSend(chatId, reply);
+    return res.status(200).json({ ok: true });
+  }
+
+  // /about
+  if (lower.startsWith("/about")) {
+    const reply =
+      "📜 ABOUT GORBOY / GGT / BOT\n\n" +
+      "• GORBOY — brand, meme and lifestyle built on Gorbagana.\n" +
+      "• GORBOY GUARD TERMINAL (GGT) — web terminal for wallet / mint intel.\n" +
+      "• This bot — Telegram edge of GGT: links, quick scans, RPC status and mind-checks.\n\n" +
+      "Web:\n" +
+      "• 🌐 Site: https://www.gorboy.wtf\n" +
+      "• 🛰 GGT: https://ggt.wtf\n\n" +
+      "0$ budget. html/css/js. Meme.Build.Repeat.";
     await tgSend(chatId, reply);
     return res.status(200).json({ ok: true });
   }
@@ -393,12 +528,46 @@ export default async function handler(req, res) {
     return res.status(200).json({ ok: true });
   }
 
+  // /rpc
+  if (lower.startsWith("/rpc")) {
+    const status = await fetchRpcStatus();
+
+    if (!status.ok) {
+      const reply =
+        "📡 GORBOY RPC STATUS\n\n" +
+        "STATE: offline / error\n" +
+        `Note: ${status.error || "unknown"}\n\n` +
+        "RPC endpoint used:\n" +
+        RPC_ENDPOINT;
+      await tgSend(chatId, reply);
+      return res.status(200).json({ ok: true });
+    }
+
+    const slotStr =
+      typeof status.slot === "number" ? status.slot.toString() : "n/a";
+    const latStr =
+      typeof status.latencyMs === "number"
+        ? `${status.latencyMs} ms`
+        : "n/a";
+
+    const reply =
+      "📡 GORBOY RPC STATUS\n\n" +
+      "CHAIN: Gorbagana (Solana-style JSON-RPC)\n" +
+      `STATE: online\n` +
+      `SLOT: ${slotStr}\n` +
+      `LATENCY: ${latStr}\n\n` +
+      "Endpoint:\n" +
+      RPC_ENDPOINT;
+    await tgSend(chatId, reply);
+    return res.status(200).json({ ok: true });
+  }
+
   // /status
   if (lower.startsWith("/status")) {
     const reply =
       "📡 GORBOY GUARD STATUS (static)\n\n" +
       "CHAIN: Gorbagana (concept layer)\n" +
-      "RPC: planned integration\n" +
+      "RPC: wired via /rpc command\n" +
       "GGT: web terminal online\n" +
       "BOT: command router online\n" +
       "RISK ENGINE: text-based placeholders\n" +
@@ -441,6 +610,9 @@ export default async function handler(req, res) {
   // /mind <text>
   if (lower.startsWith("/mind")) {
     const arg = text.slice(5).trim();
+    if (isOnCooldown(chatId, fromId)) {
+      return res.status(200).json({ ok: true, skipped: "cooldown" });
+    }
     const reply = buildMindReply(arg);
     await tgSend(chatId, reply);
     return res.status(200).json({ ok: true });
@@ -459,10 +631,15 @@ export default async function handler(req, res) {
       return res.status(200).json({ ok: true });
     }
 
+    if (isOnCooldown(chatId, fromId)) {
+      return res.status(200).json({ ok: true, skipped: "cooldown" });
+    }
+
     const meta = buildDyorLinks(token);
     const title = meta.title;
     const trashscanUrl = meta.trashscan;
     const ggtUrl = meta.ggt;
+    const eggLine = getEasterEggLine(token);
 
     let extraLine = "";
     if (meta.extra) extraLine = `\nNote: ${meta.extra}`;
@@ -471,7 +648,7 @@ export default async function handler(req, res) {
       "🔍 GORBOY SCAN REQUEST\n\n" +
       `Target: \`${title}\`\n` +
       `Type: *${token.type.toUpperCase()}*` +
-      `${extraLine}\n\n` +
+      `${extraLine}${eggLine}\n\n` +
       "Links:\n" +
       `• Trashscan: ${trashscanUrl}\n` +
       `• GGT Terminal: ${ggtUrl}\n\n` +
@@ -483,7 +660,7 @@ export default async function handler(req, res) {
   }
 
   //
-  // ===== ДАЛЬШЕ — ТОЛЬКО ТО, ЧТО ТЫ ПРОСИЛ =====
+  // ===== Обычные сообщения (без слеша) =====
   //
 
   // 1) DYOR на обычное сообщение — только если:
@@ -500,10 +677,15 @@ export default async function handler(req, res) {
   }
 
   if (token) {
+    if (isOnCooldown(chatId, fromId)) {
+      return res.status(200).json({ ok: true, skipped: "cooldown" });
+    }
+
     const meta = buildDyorLinks(token);
     const title = meta.title;
     const trashscanUrl = meta.trashscan;
     const ggtUrl = meta.ggt;
+    const eggLine = getEasterEggLine(token);
 
     let extraLine = "";
     if (meta.extra) extraLine = `\nNote: ${meta.extra}`;
@@ -512,7 +694,7 @@ export default async function handler(req, res) {
       "🔍 GORBOY DYOR SNAPSHOT\n\n" +
       `Target: \`${title}\`\n` +
       `Type: *${token.type.toUpperCase()}*` +
-      `${extraLine}\n\n` +
+      `${extraLine}${eggLine}\n\n` +
       "Links:\n" +
       `• Trashscan: ${trashscanUrl}\n` +
       `• GGT Terminal: ${ggtUrl}\n\n` +
@@ -528,11 +710,16 @@ export default async function handler(req, res) {
   const hasGor = /\bgor\b/i.test(text);
 
   if (hasGorboy || hasGor) {
+    if (isOnCooldown(chatId, fromId)) {
+      return res.status(200).json({ ok: true, skipped: "cooldown" });
+    }
+
     const reply =
       "GORBOY is a brand, a meme and a Guard Terminal.\n\n" +
       "🌐 Site: https://www.gorboy.wtf\n" +
       "🛰 GGT: https://ggt.wtf\n\n" +
       "Commands:\n" +
+      "/about – what this is\n" +
       "/help – full menu\n" +
       "/scan $ticker – quick DYOR\n" +
       "/mind <text> – sarcastic engine\n\n" +
@@ -548,9 +735,14 @@ export default async function handler(req, res) {
     return res.status(200).json({ ok: true });
   }
 
+  if (isOnCooldown(chatId, fromId)) {
+    return res.status(200).json({ ok: true, skipped: "cooldown" });
+  }
+
   const hint =
     "I only react to commands, `$tickers` and addresses.\n\n" +
     "Try:\n" +
+    "• /about\n" +
     "• /help\n" +
     "• /scan $ticker\n" +
     "• /scan <token_address>\n" +
