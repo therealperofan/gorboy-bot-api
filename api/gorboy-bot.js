@@ -74,7 +74,6 @@ function extractTokenFromText(text) {
   }
 
   // 3) plain word → treat as ticker (e.g. "gorboy")
-  // (используем в /scan, но не в авто-DYOR по raw-сообщениям)
   const plainMatch = trimmed.match(/^[A-Za-z0-9_]{2,20}$/);
   if (plainMatch) {
     return { type: "ticker", value: plainMatch[0].toUpperCase() };
@@ -119,10 +118,11 @@ function buildDyorLinks(token) {
     };
   }
 
-  // Address → линк под автоскан в GGT
+  // Address → ВАЖНО: ссылка под автоскан в GGT
   return {
     title: value,
     trashscan: `https://trashscan.xyz/token/${encoded}`,
+    // тут меняем на ?mint= чтобы autoScanFromUrl мог подцепить
     ggt: `https://ggt.wtf/?mint=${encoded}`,
     extra: null,
   };
@@ -165,21 +165,6 @@ function buildMindReply(input) {
     `Input: "${base}"\n\n` +
     `Output: ${verdict}`
   );
-}
-
-/**
- * Should we react in group/supergroup/channel?
- * Only if there is: GOR / GORBOY / $ticker
- */
-function shouldReactToGroupMessage(text) {
-  if (!text) return false;
-  const lower = text.toLowerCase();
-
-  const hasGorboy = /\bgorboy\b/.test(lower);
-  const hasGor = /\bgor\b/.test(lower);
-  const hasDollarTicker = /\$[A-Za-z0-9_]{2,20}/.test(text);
-
-  return hasGorboy || hasGor || hasDollarTicker;
 }export default async function handler(req, res) {
   // Telegram may ping with GET — always ok
   if (req.method !== "POST") {
@@ -270,14 +255,12 @@ function shouldReactToGroupMessage(text) {
   const chatId = msg.chat.id;
   const text = msg.text.trim();
   const lower = text.toLowerCase();
-  const chatType = msg.chat.type || "private";
-  const isGroupLike =
-    chatType === "group" || chatType === "supergroup" || chatType === "channel";
 
   // ------------- COMMAND ROUTER -------------
 
   // /start (+ payload с deep-link)
   if (lower.startsWith("/start")) {
+    // payload может прийти как "/start something"
     const parts = text.split(" ");
     let payload = parts.length > 1 ? parts.slice(1).join(" ").trim() : "";
 
@@ -285,9 +268,10 @@ function shouldReactToGroupMessage(text) {
 
     if (payload) {
       try {
+        // если прилетело url-энкоднутое значение
         payload = decodeURIComponent(payload);
       } catch (e) {
-        // ignore
+        // ignore decode errors
       }
 
       // поддержка префикса "scan_XXXXXXXX"
@@ -314,6 +298,7 @@ function shouldReactToGroupMessage(text) {
       "0$ budget · html/css/js · vercel\n" +
       "Meme.Build.Repeat.";
 
+    // если deep-link принёс токен → сразу отдаём мини-скан
     if (deepToken) {
       const meta = buildDyorLinks(deepToken);
       const title = meta.title;
@@ -491,25 +476,9 @@ function shouldReactToGroupMessage(text) {
     return res.status(200).json({ ok: true });
   }
 
-  // ------------- ФИЛЬТР ДЛЯ ГРУПП -------------
-
-  const isCommand = lower.startsWith("/");
-  if (isGroupLike && !isCommand && !shouldReactToGroupMessage(text)) {
-    // в группах и каналах игнорим всё, что не относится к GOR/GORBOY/$ticker
-    return res.status(200).json({ ok: true });
-  }
-
   // ------------- DYOR on raw message (no /scan) -------------
 
-  let token = extractTokenFromText(text);
-
-  // Для raw-сообщений тикер учитываем только если есть знак $
-  if (token && token.type === "ticker")) {
-    const dollarRegex = new RegExp("\\$" + token.value + "\\b", "i");
-    if (!dollarRegex.test(text)) {
-      token = null;
-    }
-  }
+  const token = extractTokenFromText(text);
 
   if (token) {
     const meta = buildDyorLinks(token);
@@ -598,16 +567,12 @@ function shouldReactToGroupMessage(text) {
     return res.status(200).json({ ok: true });
   }
 
-  // "gorboy" / "gor"
-  if (/\bgorboy\b/.test(lower) || /\bgor\b/.test(lower)) {
+  // "gorboy"
+  if (lower === "gorboy" || lower.includes("gorboy")) {
     const reply =
       "GORBOY is a brand, a meme and a Guard Terminal.\n\n" +
       "🌐 Site: https://www.gorboy.wtf\n" +
       "🛰 GGT: https://ggt.wtf\n\n" +
-      "Commands:\n" +
-      "/help – full menu\n" +
-      "/scan $ticker – quick DYOR\n" +
-      "/mind <text> – sarcastic engine\n\n" +
       "0$ budget. html/css/js. Meme.Build.Repeat.";
     await tgSend(chatId, reply);
     return res.status(200).json({ ok: true });
@@ -623,7 +588,7 @@ function shouldReactToGroupMessage(text) {
     return res.status(200).json({ ok: true });
   }
 
-  // ------------- DEFAULT: NO ECHO, JUST HINT (в личке) -------------
+  // ------------- DEFAULT: NO ECHO, JUST HINT -------------
 
   const hint =
     "I only react to commands and token hints.\n\n" +
